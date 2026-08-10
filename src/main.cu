@@ -7,6 +7,7 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #define CUDA_CHECK(call)                                                        \
@@ -20,6 +21,8 @@
     } while (0)
 
 constexpr int TILE_SIZE = 16;
+constexpr int GPU_WARMUP_RUNS = 1;
+constexpr int GPU_BENCHMARK_RUNS = 10;
 
 __global__ void matmul_naive(const float* A,
                              const float* B,
@@ -120,14 +123,22 @@ bool verify(const std::vector<float>& reference,
 }
 
 template <typename Kernel>
-float run_gpu_kernel(Kernel kernel,
-                     const float* d_A,
-                     const float* d_B,
-                     float* d_C,
-                     int n,
-                     dim3 grid,
-                     dim3 block)
+float benchmark_gpu_kernel(Kernel kernel,
+                           const float* d_A,
+                           const float* d_B,
+                           float* d_C,
+                           int n,
+                           dim3 grid,
+                           dim3 block)
 {
+    // Untimed warm-up launch to remove first-launch/JIT/context overhead
+    // from the reported benchmark.
+    for (int i = 0; i < GPU_WARMUP_RUNS; ++i) {
+        kernel<<<grid, block>>>(d_A, d_B, d_C, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
     cudaEvent_t start{};
     cudaEvent_t stop{};
 
@@ -136,19 +147,21 @@ float run_gpu_kernel(Kernel kernel,
 
     CUDA_CHECK(cudaEventRecord(start));
 
-    kernel<<<grid, block>>>(d_A, d_B, d_C, n);
-    CUDA_CHECK(cudaGetLastError());
+    for (int i = 0; i < GPU_BENCHMARK_RUNS; ++i) {
+        kernel<<<grid, block>>>(d_A, d_B, d_C, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
 
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
 
-    float milliseconds = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+    float total_ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&total_ms, start, stop));
 
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
 
-    return milliseconds;
+    return total_ms / static_cast<float>(GPU_BENCHMARK_RUNS);
 }
 
 int main(int argc, char** argv)
@@ -166,8 +179,16 @@ int main(int argc, char** argv)
         static_cast<std::size_t>(n) * static_cast<std::size_t>(n);
     const std::size_t bytes = element_count * sizeof(float);
 
+    cudaDeviceProp device_prop{};
+    int device_id = 0;
+    CUDA_CHECK(cudaGetDevice(&device_id));
+    CUDA_CHECK(cudaGetDeviceProperties(&device_prop, device_id));
+
+    std::cout << "GPU:         " << device_prop.name << "\n";
     std::cout << "Matrix size: " << n << " x " << n << "\n";
-    std::cout << "Tile size:   " << TILE_SIZE << " x " << TILE_SIZE << "\n\n";
+    std::cout << "Tile size:   " << TILE_SIZE << " x " << TILE_SIZE << "\n";
+    std::cout << "GPU timing:  average of " << GPU_BENCHMARK_RUNS
+              << " runs after " << GPU_WARMUP_RUNS << " warm-up run\n\n";
 
     std::vector<float> h_A(element_count);
     std::vector<float> h_B(element_count);
@@ -207,16 +228,16 @@ int main(int argc, char** argv)
         static_cast<unsigned int>((n + block.x - 1) / block.x),
         static_cast<unsigned int>((n + block.y - 1) / block.y));
 
-    std::cout << "Running naive CUDA kernel...\n";
+    std::cout << "Benchmarking naive CUDA kernel...\n";
     const float naive_ms =
-        run_gpu_kernel(matmul_naive, d_A, d_B, d_C, n, grid, block);
+        benchmark_gpu_kernel(matmul_naive, d_A, d_B, d_C, n, grid, block);
 
     CUDA_CHECK(cudaMemcpy(
         h_C_naive.data(), d_C, bytes, cudaMemcpyDeviceToHost));
 
-    std::cout << "Running tiled CUDA kernel...\n";
+    std::cout << "Benchmarking tiled CUDA kernel...\n";
     const float tiled_ms =
-        run_gpu_kernel(matmul_tiled, d_A, d_B, d_C, n, grid, block);
+        benchmark_gpu_kernel(matmul_tiled, d_A, d_B, d_C, n, grid, block);
 
     CUDA_CHECK(cudaMemcpy(
         h_C_tiled.data(), d_C, bytes, cudaMemcpyDeviceToHost));
@@ -227,20 +248,23 @@ int main(int argc, char** argv)
     std::cout << "\nResults\n";
     std::cout << "-------\n";
     std::cout << "CPU baseline: " << cpu_ms << " ms\n";
-    std::cout << "Naive CUDA:   " << naive_ms << " ms"
+    std::cout << "Naive CUDA:   " << naive_ms << " ms average"
               << " | verification: " << (naive_ok ? "PASS" : "FAIL") << "\n";
-    std::cout << "Tiled CUDA:   " << tiled_ms << " ms"
+    std::cout << "Tiled CUDA:   " << tiled_ms << " ms average"
               << " | verification: " << (tiled_ok ? "PASS" : "FAIL") << "\n";
 
     if (naive_ms > 0.0f) {
-        std::cout << "CPU / naive CUDA speedup: "
+        std::cout << "CPU / naive CUDA kernel-only speedup: "
                   << cpu_ms / naive_ms << "x\n";
     }
 
     if (tiled_ms > 0.0f) {
-        std::cout << "CPU / tiled CUDA speedup: "
+        std::cout << "CPU / tiled CUDA kernel-only speedup: "
                   << cpu_ms / tiled_ms << "x\n";
     }
+
+    std::cout << "\nNote: GPU timings measure kernel execution only and exclude "
+                 "host-device transfer overhead.\n";
 
     CUDA_CHECK(cudaFree(d_A));
     CUDA_CHECK(cudaFree(d_B));
