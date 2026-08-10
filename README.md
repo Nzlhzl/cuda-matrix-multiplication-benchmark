@@ -81,14 +81,29 @@ This repository is intentionally small enough to extend. Useful next steps inclu
 - Compare against cuBLAS SGEMM
 - Calculate effective GFLOP/s
 
-## Benchmark results
+## Benchmark Results
 
-Hardware-dependent benchmark numbers are intentionally not committed. Run the project on your CUDA-capable GPU and add your own results here.
+Benchmarks were run on Google Colab using an NVIDIA Tesla T4 GPU.
 
-| Matrix Size | CPU | Naive CUDA | Tiled CUDA |
+- CUDA Toolkit: 12.8
+- Compiler optimization: `-O3`
+- Tile size: 16 × 16
+- GPU timing: average of 10 runs after 1 untimed warm-up run
+- GPU measurements report kernel execution time only and exclude host-device transfer overhead
+
+| Matrix Size | CPU Baseline | Naive CUDA | Tiled CUDA |
 |---|---:|---:|---:|
-| 512 x 512 | TBD | TBD | TBD |
-| 1024 x 1024 | TBD | TBD | TBD |
+| 512 × 512 | 238.386 ms | 1.148 ms | 0.743 ms |
+| 1024 × 1024 | 3415.85 ms | 9.086 ms | 4.532 ms |
+| 2048 × 2048 | 84220.8 ms | 43.489 ms | 24.396 ms |
+
+All GPU outputs were verified against the CPU baseline.
+
+### Observations
+
+The tiled CUDA implementation consistently outperformed the naive CUDA kernel across all tested matrix sizes.
+
+Using shared memory allows threads within a block to reuse matrix tiles, reducing repeated global-memory accesses. The performance benefit becomes more visible as matrix size increases.
 
 ## Project structure
 
